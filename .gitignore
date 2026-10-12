@@ -1,0 +1,16 @@
+# Secrets — never commit
+backend/.env
+*.pem
+*.key
+
+# Generated / local
+graphify-out/
+__pycache__/
+*.pyc
+.venv/
+uploads/
+.pytest_cache/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/

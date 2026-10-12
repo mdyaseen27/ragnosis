@@ -1,0 +1,10 @@
+.git
+**/__pycache__
+backend/.env
+backend/uploads
+frontend/node_modules
+frontend/dist
+mobile
+ml
+paper
+graphify-out

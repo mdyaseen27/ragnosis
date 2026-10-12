@@ -1,0 +1,12 @@
+{
+  "embeddingDim": 384,
+  "format": "onnx",
+  "modelFile": "minilm-int8.onnx",
+  "name": "all-MiniLM-L6-v2",
+  "notes": "INT8-quantized (per-channel) build of all-MiniLM-L6-v2, exported by ml/export_onnx.py: 23.0 MB, embedding parity cosine 0.9929 vs the fp32 reference, retrieval top-1 agreement 1.0. Bundled in this folder with its tokenizer (tokenizer.json). Loading requires an Expo dev build (ONNX Runtime is a native module, unavailable in Expo Go); otherwise the app runs in server mode.",
+  "quantization": "int8-dynamic-per-channel",
+  "sizeMb": 23.0,
+  "task": "sentence-embeddings",
+  "version": "1.0.0",
+  "parityCosine": 0.9929
+}

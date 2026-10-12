@@ -1,0 +1,529 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{url}
+\def\UrlFont{\rmfamily}
+
+\begin{document}
+
+\title{RAGnosis: A Deterministic-Core, Retrieval-Augmented Platform for
+Medical Report Analysis with Clinician-in-the-Loop Validation}
+
+\author{\IEEEauthorblockN{[First Author], [Second Author], [Third Author]}
+\IEEEauthorblockA{\textit{Department of [Department Name]} \\
+\textit{[Institution Name]}\\
+{[City], India} \\
+\{[email1], [email2], [email3]\}@[institution-domain]}
+\and
+\IEEEauthorblockN{Guide: [Guide Name]}
+\IEEEauthorblockA{\textit{Department of [Department Name]} \\
+\textit{[Institution Name]}\\
+{[City], India} \\
+{[guide-email]@[institution-domain]}}}
+
+\maketitle
+
+\begin{abstract}
+Patients in India routinely receive laboratory reports as dense printed
+tables or photographs of printed tables, and most lack the background to
+interpret values that fall outside reference ranges. General-purpose
+large language models (LLMs) can explain such reports, but when asked to
+read them directly they may transcribe values incorrectly---an
+unacceptable failure mode for medical numbers. We present RAGnosis, a
+retrieval-augmented platform for medical report analysis integrated with
+hospital management (patient, doctor, and receptionist portals). Its
+central design decision is a strict separation of concerns: a
+\emph{deterministic analysis core}---PDF text extraction, dual-pass
+optical character recognition (OCR) for photographed reports, rule-based
+metric extraction against canonical reference ranges, a transparent
+health score, and rule-scored multi-label panel classification---performs
+every numeric operation, while generative models are used only to
+explain values that have already been extracted and verified. A
+report-grounded dialogue module answers patient questions primarily from
+the structured extracted metrics, intercepting diagnosis requests and
+pivoting to the patient's own flagged values. A clinician-in-the-loop
+workflow lets doctors correct extracted values after the fact; corrections
+recompute all derived quantities deterministically and are audit-logged.
+For the mobile client, the sentence-embedding model used for retrieval
+is exported to ONNX and int8-quantized for on-device inference. We
+describe the system architecture, the deterministic pipeline, the
+guardrailed dialogue design, and a rigorous evaluation protocol for
+validation on a corpus of Indian laboratory reports that is currently
+being assembled; large-scale accuracy results are therefore reported as
+pending rather than preliminary.
+\end{abstract}
+
+\begin{IEEEkeywords}
+retrieval-augmented generation, medical report analysis, OCR,
+deterministic extraction, multi-label classification, clinician-in-the-loop,
+quantized inference, health informatics
+\end{IEEEkeywords}
+
+\section{Introduction}
+Laboratory reports are the most common artefact of outpatient medicine,
+yet their presentation---grids of analytes, values, units, and reference
+intervals---assumes clinical training. A patient who receives a complete
+blood count (CBC) or lipid profile typically learns whether anything is
+``wrong'' only at a follow-up consultation days later. The intervening
+anxiety, and the temptation to paste the report into a general-purpose
+chatbot, are both understandable. The risk is that a generative model
+asked to read a photographed report end-to-end may silently misread a
+digit, transpose two rows, or invent a value that was never measured;
+in a medical context, a single wrong number is not a rounding error but
+misinformation about a person's body.
+
+This paper describes RAGnosis, a platform built around the opposite
+commitment: \emph{no number shown to a patient is ever produced by a
+generative model}. Every value is extracted by deterministic,
+auditable rules from the report itself; every status (Normal, Low,
+High) is decided by comparison against a canonical reference range;
+every derived quantity is a closed-form function of extracted values.
+Generative modelling is confined to two roles where its failure modes
+are benign: drafting plain-language explanations of already-verified
+values, and conversational answers that are grounded in the structured
+extraction and cite it.
+
+RAGnosis couples this analysis pipeline with the operational context in
+which reports actually circulate---a hospital workflow with patient,
+doctor, and receptionist portals, appointment scheduling, prescriptions,
+and medicine reminders---and with a clinician-in-the-loop validation
+workflow in which doctors review and correct machine extractions of
+their own patients' reports. The contributions of this work are:
+
+\begin{itemize}
+\item A deterministic extraction pipeline for Indian laboratory
+reports, covering digital PDFs and photographed reports via a dual-pass
+OCR strategy that selects between plain and preprocessed readings by a
+text-quality score (Section~IV).
+\item A rule-scored \emph{multi-label} classification scheme over 13
+report panels, combining keyword evidence with extracted-parameter
+evidence, which reflects the reality that one physical report often
+contains several panels (Section~IV).
+\item A report-grounded dialogue design in which structured extracted
+metrics---not raw OCR text---are the primary context, with guardrails
+that intercept diagnosis requests and pivot to the patient's flagged
+values (Section~V).
+\item A clinician-in-the-loop validation workflow with deterministic
+recomputation and audit logging of every correction (Section~VI).
+\item An on-device inference path for the mobile client based on an
+int8-quantized ONNX export of the retrieval embedding model
+(Section~VII), and an evaluation protocol for a forthcoming corpus of
+Indian laboratory reports (Section~VIII).
+\end{itemize}
+
+\section{Related Work}
+Retrieval-augmented generation (RAG), introduced by Lewis \emph{et
+al.}~\cite{lewis2020rag}, conditions a sequence-to-sequence model on
+passages retrieved from an external corpus, improving factuality on
+knowledge-intensive tasks. We adopt the retrieval pattern but invert
+the usual trust relationship: retrieved passages serve only as
+background education, while the authoritative context for a patient's
+question is a structured record produced by deterministic extraction.
+
+Deep learning has been applied broadly in healthcare~\cite{esteva2019guide},
+including report interpretation; however, end-to-end neural reading of
+documents couples transcription and interpretation in a way that makes
+individual values hard to audit. Our pipeline instead composes
+established, inspectable components: the Tesseract OCR
+engine~\cite{smith2007tesseract} for photographed reports and
+pdfplumber~\cite{pdfplumber} for digital PDFs. For retrieval we use
+sentence embeddings in the style of Sentence-BERT~\cite{reimers2019sbert}
+built on BERT~\cite{devlin2019bert}, specifically the distilled MiniLM
+model of Wang \emph{et al.}~\cite{wang2020minilm}, indexed with
+FAISS~\cite{johnson2019faiss}. Model compression via quantization has a
+long history in efficient inference~\cite{jacob2018quantization};
+we apply post-training int8 dynamic quantization to the embedding model
+for on-device use (Section~VII). The generative component, when
+configured, is LLaMA~3.3-70B~\cite{llama3herd2024} served through the
+Groq LPU inference platform~\cite{abts2020groq}; the system is designed
+so that no functionality depends on its availability.
+
+Clinician-in-the-loop and human-in-the-loop machine learning more
+generally recognise that expert review is not merely quality assurance
+but a data-generating process: corrections become labelled examples.
+Our validation workflow (Section~VI) follows this pattern while keeping
+the correction semantics deterministic---a corrected value is
+reclassified by the same rules as an original extraction, so the audit
+trail explains itself.
+
+\section{System Architecture}
+RAGnosis is a three-tier system (Fig.~\ref{fig:arch}). The presentation
+tier is a React~18 single-page application (built with Vite) that serves
+three role-specific portals---patient, doctor, and
+receptionist---alongside a React Native (Expo) mobile client. The
+application tier is a Flask~3 API served by Gunicorn, organised into
+modules for authentication, reports, chat, hospital operations, and
+reminders, and backed by MongoDB Atlas. The intelligence tier is the
+analysis pipeline of Section~IV plus the dialogue module of
+Section~V. Optional components (the LLM provider, the embedding model,
+and the OCR engine binary) are imported lazily: the platform boots and
+serves with none of them installed, degrading to deterministic
+behaviour rather than failing.
+
+\begin{figure}[t]
+\centering
+\small
+\begin{tabular}{|p{0.92\columnwidth}|}
+\hline
+\textbf{Presentation tier} \\
+React 18 + Vite web portals (patient / doctor / receptionist);
+Expo (React Native) mobile client \\
+\hline
+\textbf{Application tier (Flask 3 + Gunicorn)} \\
+Auth (PyJWT, bcrypt) $\cdot$ Reports $\cdot$ Chat $\cdot$ Hospital
+(appointments, prescriptions) $\cdot$ Reminders \\
+\hline
+\textbf{Deterministic analysis core} \\
+pdfplumber / dual-pass OCR $\rightarrow$ metric extraction $\rightarrow$
+multi-label classification $\rightarrow$ alerts $\rightarrow$ health
+score $\rightarrow$ summary \\
+\hline
+\textbf{Dialogue tier} \\
+Structured report context $\cdot$ optional LLaMA-3.3-70B (Groq)
+$\cdot$ deterministic report-data answerer $\cdot$ FAISS + MiniLM
+retrieval (background) \\
+\hline
+\textbf{Data tier} \\
+MongoDB Atlas: users, reports, appointments, prescriptions,
+reminders, chat sessions, validation corrections, audit log \\
+\hline
+\end{tabular}
+\caption{RAGnosis tier architecture. Data flows upward from extraction
+to presentation; no tier below the dialogue tier contains a generative
+model, and no numeric result originates in the dialogue tier.}
+\label{fig:arch}
+\end{figure}
+
+Security is enforced at the application tier. Authentication uses
+short-lived JWT access tokens (30 minutes) with rotating refresh
+tokens; passwords are hashed with bcrypt. Every route is guarded by
+role-based access control and per-object ownership checks---a patient
+can only ever read objects whose \texttt{patient\_id} equals their own
+identity, and attempts to cross that boundary are written to an audit
+log. Uploads are validated by magic bytes and size limits, login and
+password-reset endpoints are rate-limited, and password-reset tokens
+are single-use, short-lived, and stored only as SHA-256 hashes.
+Deduplication of reports is by content hash per patient, so re-uploads
+return the existing analysis instead of duplicating storage.
+
+\section{Deterministic Extraction and Multi-Label Classification}
+
+\subsection{Text Acquisition}
+Digital PDFs are read with pdfplumber~\cite{pdfplumber}, extracting both
+flowing text and table cell contents. Reports that exist only as
+photographs or scans---the common case for patients---are processed by
+an OCR path built on OpenCV pre-processing and
+Tesseract~\cite{smith2007tesseract}. Photographed tables defeat naive
+OCR in two distinct ways: glare, skew, and low contrast corrupt glyphs,
+while aggressive binarisation can shred the thin strokes of an
+otherwise clean image. Our pipeline therefore runs a \emph{dual-pass}
+read: a plain grayscale pass first, and, only if its text quality is
+poor, a second pass over an adaptively thresholded, deskewed image.
+Each candidate text is scored by a deterministic quality function
+(the count of word-like tokens), and the higher-scoring text is kept.
+The plain-first order matters: in practice the pre-processing chain
+that rescues a difficult photograph can destroy a crisp screenshot,
+and the quality pick makes the choice per document rather than by
+fiat. Both passes use Tesseract's uniform-block page segmentation,
+which preserves row order in tabular material far better than fully
+automatic segmentation.
+
+\subsection{Metric Extraction}
+Extraction is a rule system over a canonical analyte table. Each entry
+defines a parameter (e.g.\ haemoglobin, platelets, LDL cholesterol),
+its synonyms as printed by different laboratories, a canonical unit, a
+unit-conversion factor where laboratories differ, and a canonical
+reference range. Three complementary passes run over the text:
+(i)~a \emph{line pass} matching ``name value unit'' patterns on a single
+line; (ii)~a \emph{sequence pass} for OCR output in which a table has
+been dumped column-wise, pairing the ordered list of parameter names
+with the ordered list of values that follows it; and (iii)~a
+\emph{dense-table fallback} (per the project specification) that
+line-scans crowded layouts which defeat the first two passes. Values
+are normalised to canonical units before comparison. Each extracted
+metric is then assigned a status by direct comparison with the
+canonical range:
+\begin{equation}
+\text{status}(v) =
+\begin{cases}
+\text{Low}, & v < \text{lo} \\
+\text{Normal}, & \text{lo} \le v \le \text{hi} \\
+\text{High}, & v > \text{hi}
+\end{cases}
+\end{equation}
+Statuses deliberately follow the canonical ranges rather than ranges
+printed on the report, because printed ranges vary by laboratory and by
+assay; the canonical table is versioned with the code and is the same
+for every patient, which is what makes clinician corrections
+(Section~VI) comparable across reports.
+
+\subsection{Alerts and Health Score}
+A small set of critical-value rules (for example, severely low platelet
+counts) raises alerts that are surfaced on the report and to the
+patient's doctor. The health score is intentionally transparent:
+\begin{equation}
+\text{score} = \frac{\#\{\text{metrics with status Normal}\}}
+{\#\{\text{metrics extracted}\}} \times 100
+\end{equation}
+We make no claim that this ratio is a clinical risk measure; it is a
+communication device whose formula is disclosed to the user in the
+interface, and its simplicity is the point---a patient can verify it by
+counting.
+
+\subsection{Multi-Label Panel Classification}
+A physical report frequently bundles several panels: one sheet may
+carry a CBC, a lipid profile, and a fasting glucose. A single-label
+classifier is therefore the wrong abstraction. RAGnosis scores every
+one of 13 panel categories---CBC, Lipid Profile, Kidney Function,
+Liver Function, Thyroid, Diabetes, Urine, Radiology, Cardiac Markers,
+Electrolytes, Vitamins, Hormones, and General---by two evidence
+channels (Table~\ref{tab:classify}):
+
+\begin{table}[t]
+\centering
+\small
+\caption{Multi-label classification evidence. A category is assigned
+when its combined evidence score reaches a fixed threshold; the
+highest-scoring category is retained as the primary label.}
+\label{tab:classify}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Channel} & \textbf{Evidence} \\
+\midrule
+Keyword & Panel names and characteristic phrases in the \\
+        & report text (e.g.\ ``LIPID PROFILE'', ``HbA1c'') \\
+Parameter & Extracted metrics that belong to the panel \\
+        & (e.g.\ haemoglobin, platelets $\rightarrow$ CBC) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each matched keyword and each panel-consistent extracted parameter adds
+a weighted contribution; the normalised score is reported as an
+evidence-strength confidence per label. All labels at or above the
+threshold are stored on the report, so downstream consumers---doctor
+suggestions, summary focus, and the doctor's correction workflow---can act
+on the full panel set, while the highest-scoring label remains
+available as the primary category for list views and filtering. Because
+parameter evidence derives from extraction, classification quality is
+bounded by extraction quality, and both are measured separately in the
+evaluation protocol (Section~VIII).
+
+\subsection{Summarisation}
+Summaries are drafted from the extracted metrics, never from raw text:
+an extractive template composes the in-range and flagged values, the
+score, and the panel labels; when the LLM is configured it may rewrite
+the same facts in plainer language under a system prompt that forbids
+introducing new numbers, and the extractive version remains the
+fallback. The summary carries an educational-only disclaimer wherever
+it is displayed.
+
+\section{Report-Grounded Dialogue with Guardrails}
+The dialogue module answers a patient's questions about their own
+report. Its defining choice is the context hierarchy. The \emph{primary}
+context is the structured extraction: parameter names, values, units,
+canonical ranges, statuses, the health score, and the summary. The
+\emph{secondary} context is retrieval over a small curated knowledge
+base of educational passages, embedded with
+MiniLM~\cite{wang2020minilm} in the Sentence-BERT
+style~\cite{reimers2019sbert} and indexed with
+FAISS~\cite{johnson2019faiss}; retrieval supplies background explanation
+only and is never treated as a source of patient facts. The raw OCR
+text is used, if at all, only as a truncated tail excerpt, because for
+photographed reports it is a column-wise dump in which values are
+detached from their labels---precisely the failure mode the structured
+pipeline exists to repair.
+
+Answers are produced by the first available of three answerers:
+(1)~the LLM (LLaMA~3.3-70B~\cite{llama3herd2024} via
+Groq~\cite{abts2020groq}), given the structured context and any
+retrieved passages under rules that require quoting values exactly and
+forbid diagnosis; (2)~a \emph{deterministic report-data answerer} that
+answers from the metrics directly---per-parameter value, range, and
+status; the flagged-value list; the health score; a full listing; and
+(3)~curated educational passages, personalised with the patient's own
+value for that parameter when one exists. The deterministic answerer is
+not a stub: it is the default in deployments without an LLM key, and
+it guarantees that the most safety-critical questions (``which of my
+values are out of range?'') are answered by code whose behaviour can be
+tested exhaustively.
+
+Guardrails operate before any answerer. Diagnosis-seeking questions
+(``do I have \ldots?'') are intercepted and answered with an explanation
+of what the system can do, pivoted to the patient's own flagged values
+so the response remains useful rather than a refusal wall.
+Prescription and dosage requests are declined. When no report is
+attached to a session, the assistant does not fabricate one; it states
+that no report data is available and answers only general educational
+questions. Every answer carries the educational, non-diagnostic
+disclaimer described in Section~IX.
+
+\section{Clinician-in-the-Loop Validation}
+Extraction from photographed reports will sometimes be wrong, and a
+system that shows patients numbers needs a correction path that is
+stronger than a feedback button. Reports in RAGnosis are visible to
+the patient immediately---visibility is never gated on clinician
+action---and correction is layered on top as an optional, auditable
+oversight path. From the patient record, the treating doctor sees the
+extracted values of that patient's reports and can correct any value
+that the pipeline read wrongly. There is deliberately no confirm or
+approve action: silence means the values stand as extracted, and only
+actual clinician edits enter the record.
+
+Corrections are applied through the deterministic core, not around it:
+a corrected value is re-compared against the canonical range to
+recompute its status, and the health score, alerts and plain-language
+summary are recomputed. Every correction writes an
+audit record (who, when, original value, corrected value), and the
+report thereafter displays a ``Values corrected by Dr.\ [name]'' note
+to the patient, distinguishing clinician-corrected numbers from
+uncorrected extractions. The audit trail doubles as the annotation substrate for
+the evaluation corpus of Section~VIII: a corrected field is a labelled
+example with a known provenance, produced as a side effect of clinical
+use rather than a separate labelling campaign. Access control is
+unchanged by the workflow---a doctor can correct only reports of
+patients with whom an appointment relationship exists, enforced by the same
+ownership checks as every other route.
+
+\section{On-Device Quantized Inference}
+The mobile client must answer retrieval-backed questions responsively
+and, ideally, with some capability when connectivity is poor. Server
+round-trips for embedding are the avoidable cost: embedding is needed
+for every question, is small compared with generation, and is
+privacy-sensitive because the query is derived from a medical report.
+We therefore export the retrieval encoder (all-MiniLM-L6-v2, a 6-layer
+distilled transformer~\cite{wang2020minilm}) to ONNX and apply int8
+\emph{dynamic} quantization---weights stored in int8, activations
+quantized at runtime---following the integer-inference approach of
+Jacob \emph{et al.}~\cite{jacob2018quantization}, and run it with ONNX
+Runtime~\cite{onnxruntime} inside the Expo/React Native client. The
+deterministic answerer also runs in this path conceptually unchanged:
+it consumes structured metrics, which are computed server-side at
+ingestion and cached on the device with the report.
+
+Because the mobile export and its device benchmarks are being finalised
+in parallel with this draft, we report the measurement plan rather than
+numbers we cannot yet stand behind (Table~\ref{tab:ondevice}). Parity
+is defined as agreement between on-device and server embeddings:
+cosine similarity on a fixed probe set, and retrieval overlap (whether
+the top-$k$ passages returned on-device match the server's) on
+representative patient questions.
+
+\begin{table}[t]
+\centering
+\small
+\caption{On-device embedding model (all-MiniLM-L6-v2), measured on CPU
+with the export pipeline of Sec.~VII. Per-channel dynamic int8
+quantization is essential: per-tensor scales measured only 0.966 mean
+cosine parity, against 0.993 per-channel at the same size.}
+\label{tab:ondevice}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Quantity} & \textbf{FP32} & \textbf{INT8} \\
+\midrule
+Model size on disk        & 90.4 MB & 23.0 MB \\
+Embedding latency (batch 1, CPU) & 5.6 ms & 4.0 ms \\
+Cosine parity vs.\ server  & 1.000 (ref.) & 0.993 \\
+Retrieval top-1 agreement  & 1.00 & 1.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Evaluation Methodology and Preliminary Verification}
+
+\subsection{Corpus and Annotation Protocol}
+The evaluation corpus is being assembled from partner laboratories in
+India and is deliberately \emph{not} part of this draft; we describe
+the protocol so that the eventual numbers are interpretable.
+Collection targets several hundred reports across the 13 panels of
+Section~IV, with a deliberate majority of photographed (rather than
+digitally native) reports, since photographs dominate real patient
+uploads. Each report is de-identified before annotation: names,
+identifiers, contact details, and laboratory accession numbers are
+removed, and images are cropped to the report body where feasible.
+Two clinicians independently annotate, per report: the set of panel
+labels; and for each parameter, the printed value and unit transcribed
+verbatim. Disagreements are adjudicated by a third clinician. The
+result is a gold standard against which extraction is scored field by
+field rather than by document-level impression.
+
+\subsection{Metrics}
+We will report: (i)~\emph{extraction quality}---precision, recall, and
+F1 per parameter and micro/macro-averaged, where a field counts as
+correct only if value (within rounding tolerance) and unit both match;
+(ii)~\emph{status agreement}---the fraction of extracted fields whose
+Normal/Low/High status matches the status implied by the gold value
+under the canonical ranges; (iii)~\emph{label quality}---per-label and
+micro/macro F1 for the multi-label classifier, plus primary-label
+accuracy; (iv)~\emph{clinician agreement}---inter-annotator agreement
+(Cohen's $\kappa$) on labels and on transcription, to establish the
+human ceiling; and (v)~\emph{dialogue grounding}---on a fixed question
+set per report, the fraction of answers whose quoted values exactly
+match the structured extraction (for the deterministic answerer this is
+correct by construction and serves as a regression check; for the LLM
+path it is the substantive measure).
+
+\subsection{Preliminary System Verification}
+Pending the corpus, the implemented system has been verified
+functionally, end to end, on a local deployment with seeded accounts
+for all three roles: an automated suite of 65 API-level checks covering
+authentication and session handling, report upload and deduplication,
+OCR and PDF extraction, chat grounding, booking conflicts, prescriptions,
+and reminders passed in full, as did 37 browser-driven checks across the
+patient, doctor, and receptionist portals including a mobile-viewport
+pass. The deterministic components are pure functions and are exercised
+with fixed fixtures (including a photographed CBC whose column-wise OCR
+dump defeats a line-only extractor but is recovered by the sequence
+pass). These are correctness checks of behaviour, \emph{not} accuracy
+measurements, and we do not present them as such; the accuracy claims
+of this system stand or fall on the corpus evaluation above.
+
+\section{Limitations and Ethics}
+Several limitations are intrinsic to the design. Extraction quality
+bounds everything downstream: a value missed by all three extraction
+passes is invisible to classification, scoring, and dialogue alike, and
+handwritten annotations on reports are out of scope. Canonical reference
+ranges are a simplification---true ranges vary with assay, age, sex,
+and pregnancy---and the system mitigates rather than resolves this by
+using one disclosed table and routing doubtful extractions to
+clinicians. The health score is a communication device, not a risk
+score, and its presentation says so. The LLM path, when enabled, can
+still phrase an explanation misleadingly even when its numbers are
+grounded; the deterministic answerer exists partly as a check on this.
+
+Ethically, the system is educational and non-diagnostic by design: it
+never states or implies a diagnosis, declines prescription requests,
+and attaches disclaimers to summaries and answers. Patient data is
+protected by role-based access, ownership checks, hashed credentials
+and reset tokens, rate limits, and audit logging; the corpus protocol
+requires de-identification before annotation and institutional ethics
+clearance before any report is used for evaluation. Correction
+notes are shown honestly---only reports a clinician actually
+corrected carry them---because a false signal of verification would be worse than
+none.
+
+\section{Conclusion}
+RAGnosis demonstrates that a patient-facing medical report platform can
+be built so that generative models never originate a number: a
+deterministic core extracts, classifies, and scores; a grounded
+dialogue layer explains; clinicians validate through a workflow whose
+corrections recompute deterministically and accumulate as labelled
+data; and a quantized on-device encoder keeps retrieval responsive on
+mobile. The immediate next step is the corpus evaluation of
+Section~VIII, whose protocol is fixed in advance so that the results,
+whatever they are, will be interpretable. We believe the
+deterministic-core pattern generalises beyond laboratory reports to
+any domain where an LLM's fluency is welcome but its arithmetic is
+not admissible evidence.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

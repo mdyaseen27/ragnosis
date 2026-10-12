@@ -1,0 +1,1 @@
+{"expo":{"android":{"adaptiveIcon":{"backgroundColor":"#0E7490"},"package":"com.ragnosis.app"},"ios":{"bundleIdentifier":"com.ragnosis.app","supportsTablet":true},"name":"RAGnosis","newArchEnabled":true,"orientation":"portrait","scheme":"ragnosis","slug":"ragnosis","splash":{"backgroundColor":"#0E7490"},"userInterfaceStyle":"light","version":"1.0.0","web":{"bundler":"metro"}}}

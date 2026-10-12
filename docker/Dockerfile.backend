@@ -1,0 +1,25 @@
+# RAGnosis API — production image (Python 3.11, gunicorn)
+FROM python:3.11-slim
+
+# System deps for the AI pipeline stages (OCR + OpenCV). Installed now so the
+# image doesn't change shape when those stages land.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv/app
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY backend/ .
+RUN useradd -m -u 10001 appuser && mkdir -p uploads && chown -R appuser uploads
+USER appuser
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "wsgi:app"]

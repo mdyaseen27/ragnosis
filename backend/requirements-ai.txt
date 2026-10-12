@@ -1,0 +1,14 @@
+# RAGnosis AI pipeline dependencies — installed separately from the API tier
+# (backend/requirements.txt), so the API stays lean and deployable alone.
+#
+# NOTE: install torch CPU-only FIRST to avoid the ~2 GB CUDA wheel:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# System package required for OCR:  apt install tesseract-ocr
+
+pdfplumber                    # digital PDF text + table extraction
+opencv-python-headless        # image preprocessing (grayscale, deskew)
+pytesseract                   # Tesseract OCR bindings
+transformers                  # BioBERT NER + BART summarization
+sentence-transformers         # all-MiniLM-L6-v2 retrieval embeddings
+faiss-cpu                     # FAISS flat index, cosine top-k
+groq                          # LLaMA-3.3-70B chat generation

@@ -1,0 +1,23 @@
+{
+  "name": "all-MiniLM-L6-v2",
+  "task": "sentence-embedding (retrieval)",
+  "format": "ONNX opset 14",
+  "quantization": "dynamic int8 weights, per-channel scales; fp32 activations",
+  "embedding_dim": 384,
+  "max_seq_len": 256,
+  "pooling": "mean pooling over attention mask + L2 normalize (host-side)",
+  "fp32": {
+    "file": "minilm-fp32.onnx",
+    "size_bytes": 90399646,
+    "parity_cosine": 1.0,
+    "latency_ms_batch1": 5.64
+  },
+  "int8": {
+    "file": "minilm-int8.onnx",
+    "size_bytes": 23003129,
+    "parity_cosine": 0.9929,
+    "latency_ms_batch1": 4.04,
+    "retrieval_top1_agreement": 1.0
+  },
+  "pytorch_latency_ms_batch1": 21.87
+}
